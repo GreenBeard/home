@@ -22,7 +22,7 @@
 (setq whitespace-style '(face trailing tabs))
 ;(setq whitespace-style '(face tabs))
 (setq tab-face (make-face 'tab-face))
-(set-face-background 'tab-face "magenta")
+(set-face-background 'tab-face "#000005")
 (setq whitespace-tab 'tab-face)
 (global-whitespace-mode)
 (setq font-lock-keywords-only t)
@@ -70,7 +70,7 @@
 (setq vc-handled-backends ())
 
 (setq quote-face (make-face 'quote-face))
-(set-face-foreground 'quote-face "magenta")
+(set-face-foreground 'quote-face "#000005")
 
 (defun add-quote-highlights ()
   (interactive) (
@@ -93,3 +93,6 @@
 ; END
 (put 'downcase-region 'disabled nil)
 (put 'upcase-region 'disabled nil)
+
+(setq adaptive-fill-regexp "[ \t]*\\([^a-zA-Z0-9(){}]+[ \t]*\\)*")
+(setq adaptive-fill-first-line-regexp ".*")
