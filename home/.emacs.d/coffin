@@ -1,0 +1,95 @@
+(electric-indent-mode 0)
+(setq-default indent-tabs-mode nil)
+
+(defun my-insert-tab-char ()
+  "Insert a tab char. (ASCII 9, \t)"
+  (interactive)
+  (insert "\t"))
+
+(global-set-key (kbd "TAB") 'my-insert-tab-char) ; same as Ctrl+i
+
+; Disable backup and autosave files
+(setq make-backup-files nil)
+(setq auto-save-default nil)
+
+; Disable changing my settings per file (cough, tab, cough)
+(setq auto-mode-alist nil)
+(setq interpreter-mode-alist nil)
+(setq magic-mode-alist nil)
+(setq magic-fallback-mode-alist nil)
+
+(require 'whitespace)
+(setq whitespace-style '(face trailing tabs))
+;(setq whitespace-style '(face tabs))
+(setq tab-face (make-face 'tab-face))
+(set-face-background 'tab-face "magenta")
+(setq whitespace-tab 'tab-face)
+(global-whitespace-mode)
+(setq font-lock-keywords-only t)
+(setq font-lock-string-face nil)
+
+; Set column with to 80 for reformatting paragraphs
+(setq-default fill-column 80)
+
+; Enabled showing column number
+(setq column-number-mode t)
+
+; Fix window width lines to not have wraparound character
+; It doesn't work unfortunately
+;(setq overflow-newline-into-fringe nil)
+;this is an annoying testthis is an annoying testthis is an annoying testttttttt
+
+(defun toggle-case () (interactive) (setq case-fold-search (not case-fold-search)))
+
+(setq x-select-enable-clipboard nil)
+(setq select-enable-clipboard nil)
+(setq save-interprogram-paste-before-kill nil)
+
+; Stop emacs from modifying its kill ring upon pasting
+(defun stop-paste-crap ()
+(defun xterm-paste (event)
+  "Handle the start of a terminal paste operation."
+  (interactive "e")
+  (unless (eq (car-safe event) 'xterm-paste)
+    (error "xterm-paste must be found to xterm-paste event"))
+  (let* ((pasted-text (nth 1 event)))
+    (insert pasted-text)))
+;  (defun xterm-paste ()
+;    "Handle the start of a terminal paste operation."
+;    (interactive)
+;    (let* ((pasted-text (xterm--pasted-text)))
+;      (insert pasted-text)))
+)
+
+(setq interprogram-cut-function nil)
+(setq interprogram-paste-function nil)
+
+(stop-paste-crap)
+
+(setq vc-follow-symlinks t)
+(setq vc-handled-backends ())
+
+(setq quote-face (make-face 'quote-face))
+(set-face-foreground 'quote-face "magenta")
+
+(defun add-quote-highlights ()
+  (interactive) (
+    font-lock-add-keywords nil '(("\\(\'[^\"\'\n]*\'\\)" 1 quote-face) ("\\(\"[^\"\'\n]*\"\\)" 1 quote-face))
+  )
+)
+
+; unforunately emacs is overwriting the .emacs script after reading it -_-
+(add-hook 'find-file-hook #'stop-paste-crap)
+(add-hook 'find-file-hook #'add-quote-highlights)
+
+; probably a better idea is to add an event that fires after the default pasting one which then pops the most recent kill ring entry with (pop kill-ring)
+
+; BEGIN The following is courtesy of https://www.emacswiki.org/emacs/SortWords
+  (defun sort-symbols (reverse beg end)
+  "Sort symbols in region alphabetically, in REVERSE if negative. See
+    `sort-words'."
+    (interactive "*P\nr")
+    (sort-regexp-fields reverse "\\(\\sw\\|\\s_\\)+" "\\&" beg end))
+; END
+(put 'downcase-region 'disabled nil)
+(put 'upcase-region 'disabled nil)

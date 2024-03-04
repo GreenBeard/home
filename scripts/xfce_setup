@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -eu
+
+# Set up the keyboard
+xfconf-query -c keyboards -p /Default/KeyRepeat/Delay -s 250
+xfconf-query -c keyboards -p /Default/KeyRepeat/Rate -s 35
+
+# Fix the mouse settings
+xfconf-query -c xsettings -p /Gtk/CursorThemeName -s "DMZ-Black"
+xfconf-query -c xsettings -p /Gtk/CursorThemeName -s "DMZ-White"
+
+xfconf-query -c xsettings -p /Gtk/CursorThemeSize -s 32
+xfconf-query -c xsettings -p /Gtk/CursorThemeSize -s 16
+
+# TODO disable acceleration (set to 1)
+
+# Set up font setting
+xfconf-query -c xsettings -p /Xft/Antialias -s 1
+xfconf-query -c xsettings -p /Xft/Hinting -s 0
+xfconf-query -c xsettings -p /Xft/HintStyle -s hintnone
+xfconf-query -c xsettings -p /Xft/RGBA -s none
+
+# Set up icon settings
+xfconf-query -c xsettings -p /Net/IconThemeName Faenza
+
+# Set up theme(s)
+xfconf-query -c xsettings -p /Net/ThemeName Clearlooks-Phenix-DarkPurpy
+xfconf-query -c xfmw4 -p /general/theme Clearlooks-Phenix-DarkPurpy
+# TODO install gnome .gtkrc theme
+
+# TODO libgtk3-nocsd

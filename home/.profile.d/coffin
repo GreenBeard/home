@@ -1,0 +1,7 @@
+#!/bin/sh
+
+natural_scrolling.sh || true;
+fix_mouse_style.sh || true;
+clean_downloads.sh || true;
+
+export MOZ_USE_XINPUT2=1;

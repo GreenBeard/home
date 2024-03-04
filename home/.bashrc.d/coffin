@@ -1,0 +1,15 @@
+#!/bin/bash
+
+set +H
+
+alias clip="xclip -selection clipboard"
+alias notify="notify-send -u critical -i utilities-terminal \"Hey, human. I finished your long running task.\""
+
+pptxtext() {
+  for file in "$@"; do
+    unzip -qc "$file" ppt/slides/slide*.xml | grep -oP '(?<=\<a:t\>).*?(?=\</a:t\>)'
+    unzip -qqc "$file" ppt/notesSlides/notesSlide*.xml | grep -oP '(?<=\<a:t\>).*?(?=\</a:t\>)'
+  done
+}
+
+export EDITOR="emacs";

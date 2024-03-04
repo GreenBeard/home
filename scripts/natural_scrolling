@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# From https://askubuntu.com/a/1067336
+# License: CC BY-SA 4.0
+
+# Find all xinput devices whose name matches any of the arguments passed here,
+# then set the Natural Scrolling' property to '1' regardless of its
+# current state.
+
+# expect multiple arguments, store them as array
+device_names="$@"
+
+for device_name in "${device_names[@]}"; do
+    deviceIds="$(xinput --list | awk -v search="$device_name" \
+    '$0 ~ search {
+       match($0, /id=[0-9]+/);
+       if (RSTART)
+         print substr($0, RSTART+3, RLENGTH-3)
+     }' \
+     )"
+  # set device-specific property (works i.e for 'TrackPoint' & 'Logitech')
+  for deviceId in $deviceIds; do
+    xinput set-prop "$deviceId" "libinput Natural Scrolling Enabled" 1
+  done
+done
