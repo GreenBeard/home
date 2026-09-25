@@ -9,6 +9,10 @@
 # expect multiple arguments, store them as array
 device_names="$@"
 
+if [ -z "$DISPLAY" ]; then
+  exit 0
+fi
+
 for device_name in "${device_names[@]}"; do
     deviceIds="$(xinput --list | awk -v search="$device_name" \
     '$0 ~ search {

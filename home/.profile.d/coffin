@@ -1,7 +1,18 @@
-#!/bin/sh
+#!/usr/bin/env sh
 
-natural_scrolling.sh || true;
-fix_mouse_style.sh || true;
-clean_downloads.sh || true;
+PATH="$PATH:$HOME/workspace/home/scripts"
+
+if [ "$(cat "/proc/$PPID/comm")" = "codex" ]; then
+  echo "BAD CODEX! DO NOT USE LOGIN SHELL"
+  exit 1
+fi
+
+natural_scrolling || true;
+xfce_setup || true;
+clean_downloads || true;
 
 export MOZ_USE_XINPUT2=1;
+export BROWSER=brave-browser
+if [ -n "$DISPLAY" ]; then
+  xset b off
+fi

@@ -1,3 +1,11 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-trash "$HOME/Downloads/"*
+oldstate="$(shopt -po; shopt -p)"; [[ -o errexit ]] && oldstate="$oldstate; set -e"
+
+shopt -s nullglob
+files=("$HOME/Downloads/"*)
+if [ "${#files[@]}" -gt 0 ]; then
+  trash "${files[@]}"
+fi
+
+eval "${oldstate}"

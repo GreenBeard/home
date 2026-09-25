@@ -22,11 +22,11 @@ xfconf-query -c xsettings -p /Xft/HintStyle -s hintnone
 xfconf-query -c xsettings -p /Xft/RGBA -s none
 
 # Set up icon settings
-xfconf-query -c xsettings -p /Net/IconThemeName Faenza
+xfconf-query -c xsettings -p /Net/IconThemeName -s Faenza
 
 # Set up theme(s)
-xfconf-query -c xsettings -p /Net/ThemeName Clearlooks-Phenix-DarkPurpy
-xfconf-query -c xfmw4 -p /general/theme Clearlooks-Phenix-DarkPurpy
+xfconf-query -c xsettings -p /Net/ThemeName -s Clearlooks-Phenix-DarkPurpy
+xfconf-query -c xfwm4 -p /general/theme -s Clearlooks-Phenix-DarkPurpy
 # TODO install gnome .gtkrc theme
 
 # TODO libgtk3-nocsd
