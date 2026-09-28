@@ -78,8 +78,10 @@
 (set-face-foreground 'quote-face "#000005")
 
 (defun add-quote-highlights ()
-  (interactive) (
-    font-lock-add-keywords nil '(("\\(\'[^\"\'\n]*\'\\)" 1 quote-face) ("\\(\"[^\"\'\n]*\"\\)" 1 quote-face))
+  (interactive)
+  ;; Rust buffers get real string/char highlighting from rust-mode instead.
+  (unless (derived-mode-p 'rust-mode)
+    (font-lock-add-keywords nil '(("\\(\'[^\"\'\n]*\'\\)" 1 quote-face) ("\\(\"[^\"\'\n]*\"\\)" 1 quote-face)))
   )
 )
 
@@ -101,3 +103,463 @@
 
 (setq adaptive-fill-regexp "[ \t]*\\([^a-zA-Z0-9(){}]+[ \t]*\\)*")
 (setq adaptive-fill-first-line-regexp ".*")
+
+;;;; ===================================================================
+;;;; Rust: rust-mode (strings only) + lsp-mode + company, all manual
+;;;; ===================================================================
+
+;;; Packages: straight.el, pinned by ~/.emacs.d/straight/versions/default.el
+;;; Update: M-x straight-pull-package, test, M-x straight-freeze-versions.
+;;; Restore pinned versions on a new machine: M-x straight-thaw-versions.
+
+(setq package-enable-at-startup nil)
+(setq straight-check-for-modifications nil) ; no scanning at startup
+;; Use Emacs's own eldoc instead of downloading a newer copy.
+(setq straight-built-in-pseudo-packages
+      '(emacs nadvice python image-mode project flymake xref eldoc))
+;; Must be set before lsp-mode is compiled (faster JSON handling).
+(setenv "LSP_USE_PLISTS" "true")
+
+(defvar bootstrap-version)
+(let ((bootstrap-file
+       (expand-file-name "straight/repos/straight.el/bootstrap.el"
+                         user-emacs-directory))
+      (bootstrap-version 7))
+  (unless (file-exists-p bootstrap-file)
+    (with-current-buffer
+        (url-retrieve-synchronously
+         "https://raw.githubusercontent.com/radian-software/straight.el/develop/install.el"
+         'silent 'inhibit-cookies)
+      (goto-char (point-max))
+      (eval-print-last-sexp)))
+  (load bootstrap-file nil 'nomessage))
+
+(straight-use-package 'rust-mode)
+(straight-use-package 'lsp-mode)
+(straight-use-package 'company)
+
+;;; Highlighting: rust-mode, but only string and char literals, in quote-face.
+;;; rust-mode's parser tells char literals ('x') apart from lifetimes ('a).
+
+(add-to-list 'auto-mode-alist '("\\.rs\\'" . rust-mode))
+
+(defun coffin-rust--syntactic-face (state)
+  (when (nth 3 state) 'quote-face))       ; strings/chars only, no comments
+
+(defun coffin-rust-mode-setup ()
+  (setq-local font-lock-defaults
+              '(nil nil nil nil
+                (font-lock-syntactic-face-function . coffin-rust--syntactic-face)))
+  ;; Keep my global indentation and paragraph-fill behavior, not rust-mode's.
+  (dolist (var '(indent-line-function paragraph-start paragraph-separate
+                 adaptive-fill-function adaptive-fill-first-line-regexp
+                 fill-paragraph-function fill-forward-paragraph-function
+                 normal-auto-fill-function comment-line-break-function))
+    (kill-local-variable var))
+  (coffin-rust--maybe-attach))
+
+(add-hook 'rust-mode-hook #'coffin-rust-mode-setup)
+
+;;; lsp-mode: nothing starts automatically; only the features below are on.
+
+(setq lsp-auto-configure nil             ; no breadcrumbs/lens/modeline/diagnostics UI...
+      lsp-enable-snippet nil             ; ...and these aren't covered by it:
+      lsp-enable-on-type-formatting nil
+      lsp-signature-auto-activate nil
+      lsp-before-save-edits nil
+      lsp-enable-file-watchers nil       ; rust-analyzer watches files itself
+      lsp-enable-suggest-server-download nil
+      lsp-keep-workspace-alive t         ; closing buffers never stops the server
+      lsp-diagnostics-provider :none     ; stored, never displayed while typing
+      lsp-progress-function #'coffin-rust--progress ; record, don't show in modeline
+      lsp-response-timeout nil           ; never give up waiting; C-g cancels
+      lsp-completion-provider :capf
+      lsp-completion-use-last-result nil)
+
+;; rust-analyzer: runs through the rustup proxy started in the workspace root,
+;; so it uses the same toolchain cargo would use for that project.
+(setq lsp-rust-analyzer-cargo-target-dir t          ; no lock fights with terminal builds
+      lsp-rust-analyzer-cargo-run-build-scripts t
+      lsp-rust-analyzer-cargo-watch-enable t        ; cargo check on save
+      lsp-rust-analyzer-completion-auto-import-enable nil
+      lsp-rust-analyzer-completion-postfix-enable nil
+      lsp-rust-analyzer-completion-add-call-parenthesis nil
+      lsp-rust-analyzer-completion-add-call-argument-snippets nil
+      lsp-rust-analyzer-lens-enable nil
+      lsp-rust-analyzer-use-client-watching nil)
+
+(defun coffin-rust--extra-init-options (opts)
+  "Add rust-analyzer settings lsp-mode has no variables for."
+  (plist-put opts :completion
+             (append '(:callable (:snippets "none")
+                       :snippets (:custom #s(hash-table data ())))
+                     (plist-get opts :completion)))
+  (plist-put opts :files (plist-put (plist-get opts :files) :watcher "server"))
+  opts)
+
+(with-eval-after-load 'lsp-rust
+  (advice-add 'lsp-rust-analyzer--make-init-options
+              :filter-return #'coffin-rust--extra-init-options))
+
+(with-eval-after-load 'lsp-mode
+  (require 'lsp-rust)                    ; lsp-auto-configure nil skips loading clients
+  (define-key lsp-mode-map (kbd "C-M-i") #'company-complete)
+  (add-hook 'lsp-configure-hook (lambda () (lsp-completion-mode 1)))
+  (add-hook 'lsp-managed-mode-hook
+            (lambda () (when lsp-managed-mode (eldoc-mode -1)))))
+
+;; Background requests (lsp-mode re-fetches rust-analyzer's own diagnostics after
+;; every edit) get cancelled by rust-analyzer when another edit arrives first;
+;; the newer request replaces them.  Don't report those; report anything else.
+(defun coffin-rust--error-handler (method)
+  (lambda (err)
+    (unless (memq (lsp:json-error-code err)
+                  '(-32800 -32801 -32802)) ; cancelled / content modified / server cancelled
+      (lsp--warn "%s" (or (lsp--error-string err)
+                          (format "%s Request has failed" method))))))
+
+(setq lsp-default-create-error-handler-fn #'coffin-rust--error-handler)
+
+;;; Starting, attaching, stopping
+
+(defun coffin-rust--workspace-root (file)
+  "Workspace root of FILE according to `cargo locate-project --workspace'."
+  (let ((default-directory (file-name-directory file)))
+    (with-temp-buffer
+      (when (eq 0 (call-process "cargo" nil '(t nil) nil "locate-project"
+                                "--workspace" "--message-format" "plain"))
+        (file-name-directory (string-trim (buffer-string)))))))
+
+(defun coffin-rust--running-workspace (&optional root)
+  "Running rust-analyzer workspace for ROOT (or any, if ROOT is nil)."
+  (when (featurep 'lsp-mode)
+    (seq-find (lambda (ws)
+                (and (eq (lsp--client-server-id (lsp--workspace-client ws))
+                         'rust-analyzer)
+                     (or (null root) (file-equal-p (lsp--workspace-root ws) root))))
+              (lsp--session-workspaces (lsp-session)))))
+
+(defun coffin-rust--connect (root)
+  (let ((project-find-functions (list (lambda (_) (cons 'transient root))))
+        (lsp-auto-guess-root t))
+    (lsp)))
+
+(defun coffin-rust--maybe-attach ()
+  "Attach this buffer if rust-analyzer already runs for its workspace."
+  (when (and buffer-file-name (coffin-rust--running-workspace))
+    (let ((root (coffin-rust--workspace-root buffer-file-name)))
+      (when (and root (coffin-rust--running-workspace root))
+        (coffin-rust--connect root)))))
+
+(defun coffin-rust-start ()
+  "Start rust-analyzer for this buffer's Cargo workspace.
+Open Rust buffers of the same workspace attach too."
+  (interactive)
+  (unless (and (derived-mode-p 'rust-mode) buffer-file-name)
+    (user-error "Not a Rust file buffer"))
+  (let ((root (or (coffin-rust--workspace-root buffer-file-name)
+                  (user-error "cargo locate-project --workspace found no workspace"))))
+    (coffin-rust--connect root)
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'rust-mode) buffer-file-name
+                   (not (bound-and-true-p lsp-mode))
+                   (equal (coffin-rust--workspace-root buffer-file-name) root))
+          (coffin-rust--connect root))))))
+
+(defun coffin-rust-stop ()
+  "Shut down rust-analyzer for this buffer's workspace."
+  (interactive)
+  (let ((ws (or (and (bound-and-true-p lsp-mode)
+                     (seq-find (lambda (ws) (eq (lsp--client-server-id
+                                                 (lsp--workspace-client ws))
+                                                'rust-analyzer))
+                               (lsp-workspaces)))
+                (user-error "rust-analyzer isn't running for this buffer"))))
+    (lsp-workspace-shutdown ws)))
+
+;;; Completion: C-M-i only.  One blocking request per trigger; after that,
+;;; typing narrows the list inside Emacs (lsp-mode's fuzzy scorer) and never
+;;; asks the server again.  Backspacing past the trigger point starts a new
+;;; request.
+
+(setq company-idle-delay nil             ; never pop up by itself
+      company-frontends                  ; no echo-area docs: those ask the server
+      '(company-pseudo-tooltip-unless-just-one-frontend
+        company-preview-if-just-one-frontend)
+      company-transformers '(coffin-rust--no-methods-after-path
+                             coffin-rust--members-first))
+
+(defvar coffin-rust--last-timing nil)
+
+(defun coffin-rust--completion-request (orig method params)
+  "Make completion requests blocking and always \"complete\"."
+  (if (not (equal method "textDocument/completion"))
+      (funcall orig method params)
+    (let* ((start (float-time))
+           (resp (lsp-request method params)))  ; ignores input, no timeout
+      (when (lsp-completion-list? resp)
+        (setq resp (lsp-put resp :isIncomplete nil)))
+      (setq coffin-rust--last-timing
+            (list :server (- (float-time) start)
+                  :items (length (if (lsp-completion-list? resp)
+                                     (lsp:completion-list-items resp)
+                                   resp))))
+      resp)))
+
+(defun coffin-rust--no-interrupt (orig &rest args)
+  "Keep company from abandoning completion work when a key is pressed."
+  (let ((non-essential nil))
+    (apply orig args)))
+
+(defun coffin-rust--time-complete (orig &rest args)
+  (setq coffin-rust--last-timing nil)
+  (let ((start (float-time)))
+    (prog1 (apply orig args)
+      (when coffin-rust--last-timing
+        (plist-put coffin-rust--last-timing :total (- (float-time) start))))))
+
+(with-eval-after-load 'lsp-mode
+  (advice-add 'lsp-request-while-no-input :around #'coffin-rust--completion-request))
+(with-eval-after-load 'company
+  (advice-add 'company-capf :around #'coffin-rust--no-interrupt)
+  (advice-add 'company-complete :around #'coffin-rust--time-complete))
+
+(defun coffin-rust--no-methods-after-path (candidates)
+  "After `Foo::', drop methods taking any form of self; keep associated fns.
+rust-analyzer offers them because `Foo::method(&foo)' is valid Rust."
+  (if (not (and (bound-and-true-p lsp-completion-mode)
+                (save-excursion (skip-syntax-backward "w_") (looking-back "::" 2))))
+      candidates
+    (seq-remove (lambda (c) (eq (company-call-backend 'kind c) 'method)) candidates)))
+
+(defun coffin-rust--members-first (candidates)
+  "Stable-sort methods and fields ahead of everything else."
+  (if (not (bound-and-true-p lsp-completion-mode))
+      candidates
+    (let (members others)
+      (dolist (c candidates)
+        (if (memq (company-call-backend 'kind c) '(method field))
+            (push c members)
+          (push c others)))
+      (nconc (nreverse members) (nreverse others)))))
+
+(defun coffin-rust-completion-timing ()
+  "Show how long the last C-M-i completion took."
+  (interactive)
+  (if (not coffin-rust--last-timing)
+      (message "No completion request timed yet")
+    (let* ((server (* 1000 (plist-get coffin-rust--last-timing :server)))
+           (total (* 1000 (or (plist-get coffin-rust--last-timing :total) 0))))
+      (message "Last completion: %.0f ms total = %.0f ms server + %.0f ms Emacs (%d items)"
+               total server (- total server)
+               (plist-get coffin-rust--last-timing :items)))))
+
+;;; Types
+
+(defun coffin-rust--hover-signature (value)
+  "The last code block before the docs in rust-analyzer hover markdown VALUE."
+  (let ((head (car (split-string value "\n---\n")))
+        (start 0) blocks)
+    (while (string-match "```[a-z]*\n\\(\\(?:.\\|\n\\)*?\\)\n```" head start)
+      (push (match-string 1 head) blocks)
+      (setq start (match-end 0)))
+    (or (car blocks) (string-trim head))))
+
+(defun coffin-rust-type ()
+  "Show the type or signature of the thing at point in the echo area."
+  (interactive)
+  (let* ((resp (lsp-request "textDocument/hover" (lsp--text-document-position-params)))
+         (contents (and resp (lsp:hover-contents resp)))
+         (value (and contents (if (stringp contents) contents
+                                (lsp:markup-content-value contents)))))
+    (if (not value)
+        (message "No type information at point")
+      (message "%s" (coffin-rust--hover-signature value)))))
+
+;;; Diagnostics: a page (M-x coffin-rust-diagnostics) or an inline snapshot
+;;; (M-x coffin-rust-diagnostics-show).  Neither updates by itself.
+
+(defvar coffin-rust--progress (make-hash-table :test 'equal)
+  "Workspace root -> plist of rust-analyzer progress state.")
+
+(defun coffin-rust--progress (workspace params)
+  "Record rust-analyzer's progress reports instead of showing them."
+  (let* ((root (lsp--workspace-root workspace))
+         (state (gethash root coffin-rust--progress))
+         (token (format "%s" (lsp:progress-params-token params)))
+         (value (lsp:progress-params-value params))
+         (kind (lsp:work-done-progress-kind value))
+         (active (or (plist-get state :active) (make-hash-table :test 'equal)))
+         (check (string-match-p "flycheck" token)))
+    (pcase kind
+      ("begin"
+       (puthash token (lsp:work-done-progress-begin-title value) active)
+       (when check (setq state (plist-put state :check-running (current-time)))))
+      ("end"
+       (remhash token active)
+       (when check
+         (setq state (plist-put state :check-running nil))
+         (setq state (plist-put state :check-finished (current-time))))))
+    (puthash root (plist-put state :active active) coffin-rust--progress)))
+
+(defun coffin-rust--workspace-or-error ()
+  (or (and (bound-and-true-p lsp-mode)
+           (seq-find (lambda (ws) (eq (lsp--client-server-id (lsp--workspace-client ws))
+                                      'rust-analyzer))
+                     (lsp-workspaces)))
+      (user-error "rust-analyzer isn't running for this buffer")))
+
+(defun coffin-rust--status-line (root)
+  (let* ((state (gethash root coffin-rust--progress))
+         (running (plist-get state :check-running))
+         (finished (plist-get state :check-finished))
+         (other (let (titles)
+                  (maphash (lambda (tok title) (unless (string-match-p "flycheck" tok)
+                                                 (push title titles)))
+                           (or (plist-get state :active) (make-hash-table)))
+                  titles)))
+    (concat
+     (cond (running (format "cargo check RUNNING since %s (results incomplete)"
+                            (format-time-string "%T" running)))
+           (finished (format "cargo check finished %s" (format-time-string "%T" finished)))
+           (t "cargo check not run yet (runs on save)"))
+     (when other (format " | rust-analyzer busy: %s" (string-join other ", ")))
+     (format " | as of %s, g to refresh" (format-time-string "%T")))))
+
+(defun coffin-rust--diagnostic-list (workspace)
+  "Sorted list of (file line col severity source message) for WORKSPACE."
+  (let (rows)
+    (maphash
+     (lambda (file diags)
+       (dolist (d diags)
+         (let ((start (lsp:range-start (lsp:diagnostic-range d))))
+           (push (list file
+                       (1+ (lsp:position-line start))
+                       (1+ (lsp:position-character start))
+                       (or (lsp:diagnostic-severity? d) 1)
+                       (or (lsp:diagnostic-source? d) "?")
+                       (lsp:diagnostic-message d))
+                 rows))))
+     (lsp--workspace-diagnostics workspace))
+    (sort rows (lambda (a b) (or (string< (car a) (car b))
+                                 (and (equal (car a) (car b))
+                                      (< (cadr a) (cadr b))))))))
+
+(defvar-local coffin-rust--diag-workspace nil)
+
+(define-derived-mode coffin-rust--diagnostics-mode compilation-mode "Rust-Diags"
+  "List of rust-analyzer diagnostics.  RET visits, g refreshes."
+  ;; Don't scroll this page when visiting an entry; mark it with => instead.
+  (setq-local compilation-context-lines t)
+  (setq-local revert-buffer-function
+              (lambda (&rest _) (coffin-rust--fill-diagnostics))))
+(define-key coffin-rust--diagnostics-mode-map (kbd "g") #'revert-buffer)
+
+(defun coffin-rust--fill-diagnostics ()
+  (let* ((ws coffin-rust--diag-workspace)
+         (root (lsp--workspace-root ws))
+         (inhibit-read-only t))
+    ;; Drop remembered file positions; they shift as files are edited, and
+    ;; reusing them makes jumps land off by the lines added or removed.
+    (compilation-forget-errors)
+    (erase-buffer)
+    (setq default-directory (file-name-as-directory root))
+    (setq header-line-format (coffin-rust--status-line root))
+    (let ((rows (coffin-rust--diagnostic-list ws)))
+      (dolist (r rows)
+        (pcase-let ((`(,file ,line ,col ,sev ,source ,msg) r))
+          (insert (format "%s:%d:%d: %s: [%s] %s\n"
+                          (file-relative-name file root) line col
+                          (pcase sev (1 "error") (2 "warning") (3 "info") (_ "note"))
+                          source
+                          (replace-regexp-in-string "\n" "\n    " msg)))))
+      (unless rows (insert "No diagnostics.\n")))
+    (goto-char (point-min))
+    (compilation-parse-errors (point-min) (point-max))))
+
+(defun coffin-rust-diagnostics ()
+  "Show rust-analyzer's current diagnostics for this workspace in a page."
+  (interactive)
+  (let ((ws (coffin-rust--workspace-or-error))
+        (buf (get-buffer-create "*rust-diagnostics*")))
+    (with-current-buffer buf
+      (coffin-rust--diagnostics-mode)
+      (setq coffin-rust--diag-workspace ws)
+      (coffin-rust--fill-diagnostics))
+    (setq next-error-last-buffer buf)
+    (pop-to-buffer buf)))
+
+(defun coffin-rust-diagnostics-hide ()
+  "Remove the inline diagnostics snapshot."
+  (interactive)
+  (remove-overlays nil nil 'coffin-rust-diag t)
+  (remove-hook 'after-change-functions #'coffin-rust--hide-on-edit t))
+
+(defun coffin-rust--hide-on-edit (&rest _)
+  (coffin-rust-diagnostics-hide))
+
+(defun coffin-rust-diagnostics-show ()
+  "Show a snapshot of this file's diagnostics inline; it clears on your next edit."
+  (interactive)
+  (coffin-rust-diagnostics-hide)
+  (let ((diags (gethash (lsp--fix-path-casing buffer-file-name)
+                        (lsp--workspace-diagnostics (coffin-rust--workspace-or-error)))))
+    (dolist (d diags)
+      (let* ((region (lsp--range-to-region (lsp:diagnostic-range d)))
+             (face (if (eq (lsp:diagnostic-severity? d) 1) 'error 'warning))
+             (beg (car region))
+             (end (max (cdr region) (min (1+ beg) (line-end-position))))
+             (ov (make-overlay beg end))
+             (eol (make-overlay (save-excursion (goto-char beg) (line-end-position))
+                                (save-excursion (goto-char beg) (line-end-position)))))
+        (overlay-put ov 'coffin-rust-diag t)
+        (overlay-put ov 'face `(:inherit ,face :underline t))
+        (overlay-put eol 'coffin-rust-diag t)
+        (overlay-put eol 'after-string
+                     (propertize (concat "  <- " (car (split-string (lsp:diagnostic-message d) "\n")))
+                                 'face face))))
+    (add-hook 'after-change-functions #'coffin-rust--hide-on-edit nil t)
+    (message "%d diagnostics shown; they clear on your next edit" (length diags))))
+
+;;; All types in a file: a snapshot of rust-analyzer's type hints
+;;; (M-x coffin-rust-types-show).  Clears on your next edit; never updates.
+
+;; Lets rust-analyzer compute type hints.  With lsp-auto-configure nil,
+;; lsp-mode never requests or shows them on its own.
+(setq lsp-inlay-hint-enable t
+      lsp-rust-analyzer-display-chaining-hints t           ; types in method chains
+      lsp-rust-analyzer-closure-return-type-hints "always")
+
+(defun coffin-rust-types-hide ()
+  "Remove the inline types snapshot."
+  (interactive)
+  (remove-overlays nil nil 'coffin-rust-type t)
+  (remove-hook 'after-change-functions #'coffin-rust--types-hide-on-edit t))
+
+(defun coffin-rust--types-hide-on-edit (&rest _)
+  (coffin-rust-types-hide))
+
+(defun coffin-rust-types-show ()
+  "Show the types rust-analyzer infers for this whole file, inline.
+It's a snapshot: it clears on your next edit."
+  (interactive)
+  (coffin-rust--workspace-or-error)
+  (coffin-rust-types-hide)
+  (let ((hints (lsp-request "textDocument/inlayHint"
+                            (list :textDocument (lsp--text-document-identifier)
+                                  :range (list :start (lsp-point-to-position (point-min))
+                                               :end (lsp-point-to-position (point-max)))))))
+    (seq-doseq (hint hints)
+      (let* ((label (lsp:inlay-hint-label hint))
+             (text (if (stringp label) label
+                     (mapconcat #'lsp:inlay-hint-label-part-value label "")))
+             (text (concat (if (lsp:inlay-hint-padding-left? hint) " " "")
+                           text
+                           (if (lsp:inlay-hint-padding-right? hint) " " "")))
+             (pos (lsp--position-to-point (lsp:inlay-hint-position hint)))
+             (ov (make-overlay pos pos)))
+        (overlay-put ov 'coffin-rust-type t)
+        (overlay-put ov 'before-string (propertize text 'face 'lsp-inlay-hint-type-face))))
+    (add-hook 'after-change-functions #'coffin-rust--types-hide-on-edit nil t)
+    (message "%d types shown; they clear on your next edit" (length hints))))
