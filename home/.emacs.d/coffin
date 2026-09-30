@@ -8,6 +8,12 @@
 
 (global-set-key (kbd "TAB") 'my-insert-tab-char) ; same as Ctrl+i
 
+; Begin selection on C-\ (was C-SPC; C-\ was toggle-input-method).
+; C-SPC is unbound here; in Rust buffers with rust-analyzer it completes.
+(global-set-key (kbd "C-\\") #'set-mark-command)
+(global-unset-key (kbd "C-SPC"))
+(global-unset-key (kbd "C-@"))                 ; what terminals send for C-SPC
+
 (setq backup-directory-alist `(("." . "~/.saves")))
 (setq
   delete-old-versions t
@@ -204,6 +210,8 @@
 (with-eval-after-load 'lsp-mode
   (require 'lsp-rust)                    ; lsp-auto-configure nil skips loading clients
   (define-key lsp-mode-map (kbd "C-M-i") #'company-complete)
+  (define-key lsp-mode-map (kbd "C-SPC") #'company-complete)
+  (define-key lsp-mode-map (kbd "C-@") #'company-complete) ; C-SPC in a terminal
   (add-hook 'lsp-configure-hook (lambda () (lsp-completion-mode 1)))
   (add-hook 'lsp-managed-mode-hook
             (lambda () (when lsp-managed-mode (eldoc-mode -1)))))
@@ -563,3 +571,268 @@ It's a snapshot: it clears on your next edit."
         (overlay-put ov 'before-string (propertize text 'face 'lsp-inlay-hint-type-face))))
     (add-hook 'after-change-functions #'coffin-rust--types-hide-on-edit nil t)
     (message "%d types shown; they clear on your next edit" (length hints))))
+
+;;; Tab / Shift+Tab in Rust, like VS Code.  The indent width is what cargo fmt
+;;; uses for the file (tab_spaces / hard_tabs from `rustfmt --print-config').
+;;;   Tab, blank line:  go to the indentation rust-mode computes for it; if the
+;;;                     line is already indented that far, one more tab stop.
+;;;   Tab, otherwise:   insert spaces at point up to the next tab stop
+;;;                     (replacing a selection within one line).
+;;;   Tab, multi-line selection:  indent every selected line one level.
+;;;   Shift+Tab:        unindent the current or selected lines one level.
+
+(defvar-local coffin-rust--indent nil "(WIDTH . HARD-TABS) for this buffer.")
+
+(defun coffin-rust--indent-width ()
+  "Indent width cargo fmt uses for this file (asked once per buffer)."
+  (unless coffin-rust--indent
+    (let ((file buffer-file-name) width hard)
+      (when file
+        (with-temp-buffer
+          (let ((default-directory (file-name-directory file)))
+            (when (eq 0 (call-process "rustfmt" nil '(t nil) nil
+                                      "--print-config" "current" file))
+              (goto-char (point-min))
+              (when (re-search-forward "^tab_spaces = \\([0-9]+\\)$" nil t)
+                (setq width (string-to-number (match-string 1))))
+              (goto-char (point-min))
+              (setq hard (re-search-forward "^hard_tabs = true$" nil t))))))
+      (unless width
+        (message "rustfmt config unavailable for this file; indenting by 4 spaces"))
+      (setq coffin-rust--indent (cons (or width 4) (and hard t)))
+      (setq-local rust-indent-offset (car coffin-rust--indent))
+      (setq-local indent-tabs-mode (cdr coffin-rust--indent))
+      (when hard (setq-local tab-width (car coffin-rust--indent)))))
+  (car coffin-rust--indent))
+
+(defun coffin-rust--insert-to-next-stop ()
+  (let ((w (coffin-rust--indent-width))
+        (col (current-column)))
+    (if indent-tabs-mode
+        (insert "\t")
+      (insert (make-string (- (* w (1+ (/ col w))) col) ?\s)))))
+
+(defun coffin-rust--blank-line-p ()
+  (save-excursion (beginning-of-line) (looking-at-p "[ \t]*$")))
+
+(defun coffin-rust--partial-line-region-p ()
+  "Non-nil if the region lies within one line without covering all of it."
+  (let ((beg (region-beginning)) (end (region-end)))
+    (save-excursion
+      (goto-char beg)
+      (and (<= end (line-end-position))
+           (not (and (bolp) (= end (line-end-position))))))))
+
+(defun coffin-rust--shift (levels)
+  "Move the current or selected lines LEVELS tab stops right (or left if negative)."
+  (let* ((w (coffin-rust--indent-width))
+         (deactivate-mark nil)
+         (beg (if (use-region-p) (region-beginning) (point)))
+         (end (if (use-region-p) (region-end) (point))))
+    ;; Like VS Code, a selection ending at the start of a line leaves that line alone.
+    (when (and (use-region-p) (> end beg)
+               (save-excursion (goto-char end) (bolp)))
+      (setq end (1- end)))
+    (save-excursion
+      (goto-char beg)
+      (beginning-of-line)
+      (let ((last (line-number-at-pos end)))
+        (while (<= (line-number-at-pos) last)
+          (let ((ind (current-indentation)))
+            (unless (and (> levels 0) (coffin-rust--blank-line-p))
+              (indent-line-to (if (> levels 0)
+                                  (* w (1+ (/ ind w)))
+                                (max 0 (* w (/ (1- ind) w)))))))
+          (if (eobp) (setq last 0) (forward-line 1)))))))
+
+(defun coffin-rust-tab ()
+  "Indent like VS Code's Tab; see the comment above."
+  (interactive)
+  (coffin-rust--indent-width)
+  (cond
+   ((and (use-region-p) (not (coffin-rust--partial-line-region-p)))
+    (coffin-rust--shift 1))
+   ((use-region-p)
+    (delete-region (region-beginning) (region-end))
+    (coffin-rust--insert-to-next-stop))
+   ((coffin-rust--blank-line-p)
+    (let ((orig (current-indentation))
+          (col (current-column)))
+      (rust-mode-indent-line)
+      (when (<= (current-indentation) orig)  ; already there: one more stop
+        (indent-line-to orig)
+        (move-to-column col)
+        (coffin-rust--insert-to-next-stop))))
+   (t (coffin-rust--insert-to-next-stop))))
+
+(defun coffin-rust-backtab ()
+  "Unindent the current or selected lines one level, like VS Code's Shift+Tab."
+  (interactive)
+  (coffin-rust--shift -1))
+
+(with-eval-after-load 'rust-mode
+  ;; Emacs 30 binds M-q in code buffers to prog-fill-reindent-defun, which
+  ;; re-indents the whole function when point is on code.  Keep plain filling.
+  (define-key rust-mode-map (kbd "M-q") #'fill-paragraph)
+  (define-key rust-mode-map (kbd "TAB") #'coffin-rust-tab)
+  (define-key rust-mode-map (kbd "<backtab>") #'coffin-rust-backtab))
+
+;;; Formatting: C-c C-f (rust-mode's key).  With rust-analyzer attached it
+;;; formats through rust-analyzer, which runs the project's rustfmt with the
+;;; edition from Cargo.toml and the project's rustfmt.toml.  Without it, C-c C-f
+;;; is rust-mode's plain rustfmt call.
+
+(defun coffin-rust-format ()
+  "Format this file with rustfmt through rust-analyzer."
+  (interactive)
+  (coffin-rust--workspace-or-error)
+  (lsp-format-buffer))
+
+(with-eval-after-load 'lsp-mode
+  (define-key lsp-mode-map (kbd "C-c C-f") #'coffin-rust-format))
+
+;;; Imports: M-x coffin-rust-add-imports.  For each name rust-analyzer can't
+;;; resolve that has import suggestions, pick one or skip.  rust-analyzer writes
+;;; the `use' where it belongs (merged/grouped per lsp-rust-analyzer-import-*).
+;;; It rescans after each import, so a trait needed by a method on a type you
+;;; just imported (e.g. std::io::Read for File::read_to_string) is offered too.
+
+(defun coffin-rust--unresolved-names ()
+  "(START . END) of each name rust-analyzer can't resolve, in file order.
+Uses rust-analyzer's semantic tokens (not for highlighting, just to find them)."
+  (let* ((ws (coffin-rust--workspace-or-error))
+         (types (lsp:semantic-tokens-legend-token-types
+                 (lsp:semantic-tokens-options-legend
+                  (lsp:server-capabilities-semantic-tokens-provider?
+                   (lsp--workspace-server-capabilities ws)))))
+         (unresolved (seq-position types "unresolvedReference"))
+         (data (plist-get (lsp-request "textDocument/semanticTokens/full"
+                                       (list :textDocument (lsp--text-document-identifier)))
+                          :data))
+         (line 0) (col 0) (i 0) found)
+    (while (< i (length data))
+      (let ((dl (aref data i)) (dc (aref data (1+ i))))
+        (setq col (if (zerop dl) (+ col dc) dc)
+              line (+ line dl))
+        (when (eql (aref data (+ i 3)) unresolved)
+          (push (cons (lsp--position-to-point (list :line line :character col))
+                      (lsp--position-to-point
+                       (list :line line :character (+ col (aref data (+ i 2))))))
+                found)))
+      (setq i (+ i 5)))
+    (nreverse found)))
+
+(defun coffin-rust--import-actions (start end)
+  (seq-filter (lambda (a) (string-prefix-p "Import `" (lsp:code-action-title a)))
+              (lsp-request "textDocument/codeAction"
+                           (list :textDocument (lsp--text-document-identifier)
+                                 :range (list :start (lsp-point-to-position start)
+                                              :end (lsp-point-to-position end))
+                                 :context (list :diagnostics [])))))
+
+;; cargo check (rustc) errors cover what the source scan can't see, e.g. a trait
+;; needed by a method a macro calls (`write!' on a String needs fmt::Write).
+(defun coffin-rust--check-errors ()
+  "This file's errors from cargo check as (START END DIAGNOSTIC), START/END markers.
+Nil if the buffer has unsaved changes (cargo check read the saved file).
+Waits for a running check first; C-g stops waiting."
+  (let ((ws (coffin-rust--workspace-or-error)))
+    (when (plist-get (gethash (lsp--workspace-root ws) coffin-rust--progress) :check-running)
+      (message "Waiting for cargo check to finish (C-g to skip its errors)...")
+      (with-local-quit
+        (while (plist-get (gethash (lsp--workspace-root ws) coffin-rust--progress)
+                          :check-running)
+          (accept-process-output nil 0.1)))
+      (message nil))
+    (unless (buffer-modified-p)
+      (delq nil
+            (mapcar (lambda (d)
+                      (when (and (equal (lsp:diagnostic-source? d) "rustc")
+                                 (eql (lsp:diagnostic-severity? d) 1))
+                        (let ((region (lsp--range-to-region (lsp:diagnostic-range d))))
+                          (list (copy-marker (car region)) (copy-marker (cdr region) t) d))))
+                    (gethash (lsp--fix-path-casing buffer-file-name)
+                             (lsp--workspace-diagnostics ws)))))))
+
+(defun coffin-rust--error-import-actions (start end diagnostic)
+  "Import suggestions for a cargo check DIAGNOSTIC now spanning START..END."
+  (let ((d (plist-put (copy-sequence diagnostic) :range
+                      (list :start (lsp-point-to-position start)
+                            :end (lsp-point-to-position end)))))
+    (seq-filter (lambda (a) (string-prefix-p "Import `" (lsp:code-action-title a)))
+                (lsp-request "textDocument/codeAction"
+                             (list :textDocument (lsp--text-document-identifier)
+                                   :range (lsp:diagnostic-range d)
+                                   :context (list :diagnostics (vector d)))))))
+
+(defun coffin-rust--import-path (action)
+  (let ((title (lsp:code-action-title action)))
+    (string-match "`\\(.*\\)`" title)
+    (match-string 1 title)))
+
+(defun coffin-rust--next-import-question (asked check-errors)
+  "Next name not in ASKED with import suggestions, as
+\(NAME START END ACTIONS FROM-CHECK), or nil.  Unresolved names in the
+source come first, then CHECK-ERRORS (see `coffin-rust--check-errors')."
+  (let (no-suggestions)
+    (or
+     (seq-some
+      (lambda (range)
+        (let ((name (buffer-substring-no-properties (car range) (cdr range))))
+          (unless (or (member name asked) (member name no-suggestions)
+                      ;; `open' in `File::open' just repeats File's question
+                      (save-excursion (goto-char (car range)) (looking-back "::" 2)))
+            (let ((actions (coffin-rust--import-actions (car range) (cdr range))))
+              (if actions
+                  (list name (car range) (cdr range) actions nil)
+                (push name no-suggestions)
+                nil)))))
+      (coffin-rust--unresolved-names))
+     (seq-some
+      (pcase-lambda (`(,start ,end ,diagnostic))
+        (let* ((actions (coffin-rust--error-import-actions start end diagnostic))
+               (name (and actions
+                          (car (last (split-string
+                                      (string-remove-suffix
+                                       " as _" (coffin-rust--import-path (car actions)))
+                                      "::"))))))
+          (when (and name (not (member name asked)))
+            (list name (marker-position start) (marker-position end) actions t))))
+      check-errors))))
+
+(defun coffin-rust-add-imports ()
+  "Offer an import for each name in this file rust-analyzer can't resolve.
+With the buffer saved, also for this file's cargo check errors that
+rust-analyzer can fix with an import."
+  (interactive)
+  (let* ((unsaved (buffer-modified-p))
+         (check-errors (coffin-rust--check-errors))
+         (asked nil) (added 0) (home (point-marker)) question)
+    (unwind-protect
+        (while (setq question (coffin-rust--next-import-question asked check-errors))
+          (pcase-let* ((`(,name ,start ,end ,actions ,from-check) question)
+                       (paths (mapcar (lambda (a) (cons (coffin-rust--import-path a) a))
+                                      actions))
+                       (ov (make-overlay start end)))
+            (push name asked)
+            (overlay-put ov 'face 'highlight)
+            (goto-char start)
+            (unwind-protect
+                (let ((pick (completing-read
+                             (format "Import for `%s' (line %d%s; RET = %s): "
+                                     name (line-number-at-pos)
+                                     (if from-check ", from cargo check" "")
+                                     (caar paths))
+                             (append (mapcar #'car paths) '("skip"))
+                             nil t nil nil (caar paths))))
+                  (unless (equal pick "skip")
+                    (lsp-execute-code-action (cdr (assoc pick paths)))
+                    (setq added (1+ added))))
+              (delete-overlay ov))))
+      (goto-char home)
+      (set-marker home nil)
+      (dolist (e check-errors) (set-marker (nth 0 e) nil) (set-marker (nth 1 e) nil)))
+    (message "%d import%s added%s" added (if (= added 1) "" "s")
+             (if unsaved
+                 " (unsaved changes: save and rerun to also cover errors only cargo check finds, like traits used by macros)"
+               ""))))
